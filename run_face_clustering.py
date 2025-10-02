@@ -127,7 +127,7 @@ def group_faces_sequentially(input_dir, output_dir):
     print(f"✅ Estimated number of unique people: {len(groups)}")
     return groups
 
-def reassign_small_clusters(groups, input_dir, min_size=3):
+def reassign_small_clusters(groups, input_dir, min_size=6):
     """
     Reassigns images from small clusters (less than min_size) to other clusters.
     
@@ -177,55 +177,67 @@ def reassign_small_clusters(groups, input_dir, min_size=3):
                 if os.path.join(input_dir, filename) == img_path:
                     img_index = idx
                     break
-            if img_index is not None and img_index > 0:
-                # Find the closest previous image
-                prev_img_path = os.path.join(input_dir, sorted_image_files[img_index - 1])
             found_new_cluster = False
-            if prev_img_path:
-                for prev_cluster_id, prev_images in groups.items():
-                    if prev_img_path in prev_images:
-                        print(f"    .verify: {prev_img_path} vs {img_path}")
-                        try:
-                            result = DeepFace.verify(
-                                img1_path=prev_img_path,
-                                img2_path=img_path,
-                                enforce_detection=False
-                            )
-                            print(f"      Result: {result}")
-                            if result["verified"]:
-                                print(f"      Decision: Assigned to cluster {prev_cluster_id}")
-                                groups[prev_cluster_id].append(img_path)
-                                reassigned_images[img_path] = True
-                                found_new_cluster = True
-                                break
-                            else:
-                                print(f"      Decision: Not assigned")
-                        except Exception as e:
-                            logging.warning(f"Failed to verify {img_path} with {prev_img_path}: {e}")
-                if found_new_cluster:
-                    continue
-            # Step 2: If no match with the previous frame, check all other clusters
-            if not found_new_cluster:
-                candidate_clusters = {cid: imgs[0] for cid, imgs in groups.items() if len(imgs) >= min_size}
-                for candidate_id, candidate_img_path in candidate_clusters.items():
-                    print(f"    .verify: {candidate_img_path} vs {img_path}")
-                    try:
-                        result = DeepFace.verify(
-                            img1_path=candidate_img_path,
-                            img2_path=img_path,
-                            enforce_detection=False
-                        )
-                        print(f"      Result: {result}")
-                        if result["verified"]:
-                            print(f"      Decision: Assigned to cluster {candidate_id}")
-                            groups[candidate_id].append(img_path)
-                            reassigned_images[img_path] = True
-                            found_new_cluster = True
-                            break
-                        else:
-                            print(f"      Decision: Not assigned")
-                    except Exception as e:
-                        logging.warning(f"Failed to verify {img_path} with {candidate_img_path}: {e}")
+            # Check up to 6 previous images
+            if img_index is not None:
+                for offset in range(1, 7):
+                    prev_idx = img_index - offset
+                    if prev_idx < 0:
+                        break
+                    prev_img_path = os.path.join(input_dir, sorted_image_files[prev_idx])
+                    for prev_cluster_id, prev_images in groups.items():
+                        if prev_img_path in prev_images:
+                            print(f"    .verify: {prev_img_path} vs {img_path}")
+                            try:
+                                result = DeepFace.verify(
+                                    img1_path=prev_img_path,
+                                    img2_path=img_path,
+                                    enforce_detection=False
+                                )
+                                print(f"      Result: {result}")
+                                if result["verified"]:
+                                    print(f"      Decision: Assigned to cluster {prev_cluster_id}")
+                                    groups[prev_cluster_id].append(img_path)
+                                    groups[cluster_id].remove(img_path)
+                                    reassigned_images[img_path] = True
+                                    found_new_cluster = True
+                                    break
+                                else:
+                                    print(f"      Decision: Not assigned")
+                            except Exception as e:
+                                logging.warning(f"Failed to verify {img_path} with {prev_img_path}: {e}")
+                    if found_new_cluster:
+                        break
+            # If not found, check up to 6 next images
+            if not found_new_cluster and img_index is not None:
+                for offset in range(1, 7):
+                    next_idx = img_index + offset
+                    if next_idx >= len(sorted_image_files):
+                        break
+                    next_img_path = os.path.join(input_dir, sorted_image_files[next_idx])
+                    for next_cluster_id, next_images in groups.items():
+                        if next_img_path in next_images:
+                            print(f"    .verify: {next_img_path} vs {img_path}")
+                            try:
+                                result = DeepFace.verify(
+                                    img1_path=next_img_path,
+                                    img2_path=img_path,
+                                    enforce_detection=False
+                                )
+                                print(f"      Result: {result}")
+                                if result["verified"]:
+                                    print(f"      Decision: Assigned to cluster {next_cluster_id}")
+                                    groups[next_cluster_id].append(img_path)
+                                    groups[cluster_id].remove(img_path)
+                                    reassigned_images[img_path] = True
+                                    found_new_cluster = True
+                                    break
+                                else:
+                                    print(f"      Decision: Not assigned")
+                            except Exception as e:
+                                logging.warning(f"Failed to verify {img_path} with {next_img_path}: {e}")
+                    if found_new_cluster:
+                        break
             if not found_new_cluster:
                 print(f"    Decision: Remains in small cluster {cluster_id}")
 
@@ -241,7 +253,7 @@ def main():
     parser.add_argument("--blur_threshold", type=float, default=4, help="The minimum blur score for an image to be considered.")
     parser.add_argument("--min_size", type=int, default=100, help="The minimum image dimension (height or width) in pixels.")
     # Add a new argument for the final cluster size
-    parser.add_argument("--min_cluster_size", type=int, default=3, help="The minimum number of images in a final cluster.")
+    parser.add_argument("--min_cluster_size", type=int, default=6, help="The minimum number of images in a final cluster.")
 
     args = parser.parse_args()
 
