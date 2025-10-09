@@ -323,4 +323,4 @@ if __name__ == "__main__":
             img_to_cluster[img] = cid
     # Get cluster labels for each image (default to -1 if not found)
     cluster_labels = [img_to_cluster.get(img, -1) for img in image_paths]
-    save_faces_to_clusters(image_paths, cluster_labels, IMG_DIR + "_clusters")
+    save_faces_to_clusters(image_paths, cluster_labels, IMG_DIR/"_clusters")
