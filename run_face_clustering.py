@@ -135,24 +135,22 @@ def cluster_faces(image_paths):
     }
 
     ambiguous = []  # buffer of ambiguous images (not yet assigned)
-    # last confirmed representative path (always representatives[current_cluster]['path'])
+    last_in_cluster = first  # always track last image added to current cluster
     for idx in range(1, len(image_paths)):
         cur = image_paths[idx]
-        rep_path = representatives[current_cluster]["path"]
 
-        # compare incoming image to the representative of the current cluster
-        verified, distance = verify_pair(rep_path, cur)
+        # compare incoming image to the last image added to the current cluster
+        verified, distance = verify_pair(last_in_cluster, cur)
 
         if verified:
-            # incoming matches current cluster rep -> everything in ambiguous belongs to current cluster
+            # incoming matches current cluster last image -> everything in ambiguous belongs to current cluster
             if ambiguous:
                 for amb in ambiguous:
-                    # compute a per-amb distance to rep_path for logging
-                    v, d = verify_pair(rep_path, amb)
+                    v, d = verify_pair(last_in_cluster, amb)
                     clusters[current_cluster].append(amb)
                     assignments[amb] = {
                         "cluster_id": current_cluster,
-                        "compared_with": rep_path,
+                        "compared_with": last_in_cluster,
                         "verified": bool(v),
                         "distance": d
                     }
@@ -167,7 +165,7 @@ def cluster_faces(image_paths):
             clusters[current_cluster].append(cur)
             assignments[cur] = {
                 "cluster_id": current_cluster,
-                "compared_with": rep_path,
+                "compared_with": last_in_cluster,
                 "verified": True,
                 "distance": distance
             }
@@ -176,6 +174,7 @@ def cluster_faces(image_paths):
             b = calculate_blur_score(cur); s = get_image_size(cur)
             if b > rep_curr["blur"] or (b == rep_curr["blur"] and s > rep_curr["size"]):
                 representatives[current_cluster] = {"path": cur, "blur": b, "size": s}
+            last_in_cluster = cur  # update last image in cluster
             continue
 
         # not verified -> buffer it
@@ -218,6 +217,7 @@ def cluster_faces(image_paths):
                         representatives[matched_cluster] = {"path": amb, "blur": b, "size": s}
                 # move current pointer to matched_cluster
                 current_cluster = matched_cluster
+                last_in_cluster = clusters[current_cluster][-1]
                 ambiguous = []
                 continue
 
@@ -241,19 +241,19 @@ def cluster_faces(image_paths):
                     "verified": bool(v),
                     "distance": d
                 }
+            last_in_cluster = ambiguous[-1]  # last image in new cluster
             ambiguous = []
             continue
 
     # End loop: if any ambiguous frames remain (stream ended before threshold),
     # tie-break: attach them to current cluster (you can change this policy)
     if ambiguous:
-        rep_path = representatives[current_cluster]["path"]
         for amb in ambiguous:
-            v, d = verify_pair(rep_path, amb)
+            v, d = verify_pair(last_in_cluster, amb)
             clusters[current_cluster].append(amb)
             assignments[amb] = {
                 "cluster_id": current_cluster,
-                "compared_with": rep_path,
+                "compared_with": last_in_cluster,
                 "verified": bool(v),
                 "distance": d
             }
@@ -285,19 +285,18 @@ def save_faces_to_clusters(image_paths, cluster_labels, output_dir):
 # -------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cluster face images in a directory.")
-    parser.add_argument("--img_dir", type=str, required=True, help="Directory containing face images.")
+    parser.add_argument("--input_dir", type=str, required=True, help="Directory containing face images.")
     args = parser.parse_args()
 
-    IMG_DIR = Path(args.img_dir)
-    OUTPUT_CSV = IMG_DIR/"face_clusters.csv"
-    OUTPUT_JSON = IMG_DIR/"face_clusters.json"
+    IMG_DIR = Path(args.input_dir)
+    CLST_DIR = IMG_DIR/"clusters"
+    OUTPUT_CSV = CLST_DIR/"face_clusters.csv"
+    OUTPUT_JSON = CLST_DIR/"face_clusters.json"
     
     logging.basicConfig(level=logging.INFO)
     image_paths = sorted(
-        [
-            (IMG_DIR, f) for f in IMG_DIR.iterdir()
-            if f.lower().endswith((".png", ".jpg", ".jpeg")) and get_image_size(IMG_DIR, f) >= 10000
-        ]
+        [f for f in IMG_DIR.iterdir()
+        if f.suffix.lower() in (".png", ".jpg", ".jpeg") and get_image_size(str(f)) >= 10000]
     )
     if not image_paths:
         raise ValueError(f"No images in {IMG_DIR}")
@@ -343,4 +342,4 @@ if __name__ == "__main__":
             img_to_cluster[img] = cid
     # Get cluster labels for each image (default to -1 if not found)
     cluster_labels = [img_to_cluster.get(img, -1) for img in image_paths]
-    save_faces_to_clusters(image_paths, cluster_labels, Path(IMG_DIR)/"clusters")
+    save_faces_to_clusters(image_paths, cluster_labels, CLST_DIR)
