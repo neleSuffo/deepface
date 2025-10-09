@@ -507,7 +507,7 @@ def final_confirmation(clusters, representatives):
         for img in imgs_to_check:
             verified, distance = verify_pair(rep_path, img)
             # 1. Confident assignment: distance <= FINAL_CONFIRMATION_DISTANCE_THRESHOLD
-            if distance is not None and distance <= FaceConfig.FINAL_CONFIRMATION_DISTANCE_THRESHOLD:
+            if verified:
                 continue  # Already assigned to current cluster, do nothing
             # 2. Uncertain: between thresholds, check all clusters and assign to the one with lowest distance
             elif distance is not None and FaceConfig.FINAL_CONFIRMATION_DISTANCE_THRESHOLD < distance <= FaceConfig.VERIFIED_DISTANCE_THRESHOLD:
@@ -522,7 +522,7 @@ def final_confirmation(clusters, representatives):
                     clusters[min_cluster_id].append(img)
                     clusters[cluster_id].remove(img)
             # 3. Outlier: distance > VERIFIED_DISTANCE_THRESHOLD, try to assign to another cluster or create new
-            elif distance is not None and distance > FaceConfig.VERIFIED_DISTANCE_THRESHOLD:
+            elif verified is False:
                 assigned = False
                 for other_cluster_id, other_rep in representatives.items():
                     if other_cluster_id == cluster_id:
@@ -574,7 +574,7 @@ if __name__ == "__main__":
             if face_objs and len(face_objs) > 0:
                 image_paths_deepface.append(img_path)
         except ValueError:
-            logging.warning(f"DeepFace failed to detect face in {img_path}, skipping.")
+            continue
     if not image_paths_deepface:
         raise ValueError(f"No images in {IMG_DIR}")
 
@@ -611,17 +611,6 @@ if __name__ == "__main__":
     with open(OUTPUT_JSON, "w") as jf:
         json.dump(results, jf, indent=2)
 
-    print(f"Clusters: {len(clusters)}  —  Saved to {OUTPUT_CSV}, {OUTPUT_JSON}")
-    print("Elapsed (s):", (datetime.now() - start).total_seconds())
-
-    # Print summary of clusters, images per cluster and representatives per cluster
-    print("\nCluster Summary:")
-    for cluster_id, imgs in clusters.items():
-        print(f"  Cluster {cluster_id}: {len(imgs)} images")
-        rep = reps.get(cluster_id)
-        if rep:
-            print(f"    Representative: {Path(rep['path']).name}")
-
     # Build a mapping from image path to cluster id
     img_to_cluster = {}
     for cluster_id, imgs in clusters.items():
@@ -634,3 +623,13 @@ if __name__ == "__main__":
         # Get cluster labels for each image (default to -1 if not found)
         cluster_labels = [img_to_cluster_renumbered.get(img, -1) for img in image_paths]
         save_faces_to_clusters(image_paths, cluster_labels, CLST_DIR)
+    
+    print(f"Clusters: {len(clusters)}  —  Saved to {OUTPUT_CSV}, {OUTPUT_JSON}")
+
+    # Print summary of clusters, images per cluster and representatives per cluster (after renumbering)
+    print("\nCluster Summary:")
+    for cluster_id, imgs in clusters.items():
+        print(f"  Cluster {cluster_id}: {len(imgs)} images")
+        rep = reps.get(cluster_id)
+        if rep:
+            print(f"    Representative: {Path(rep['path']).name}")
