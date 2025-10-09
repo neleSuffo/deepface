@@ -12,8 +12,6 @@ from tqdm import tqdm
 from pathlib import Path
 from config import FaceConfig
 
-logging.basicConfig(level=logging.INFO)
-
 # -------------------
 # Utilities
 # -------------------
@@ -130,7 +128,7 @@ def compute_best_representative(image_list):
     for p in image_list:
         b = calculate_blur_score(p)
         s = get_image_size(p)
-        if best is None or b > best["blur"] or (b == best["blur"] and s > best["size"]):
+        if best is None or s > best["size"] or (s == best["size"] and b > best["blur"]):
             best = {"path": p, "blur": b, "size": s}
     return best
 
@@ -141,12 +139,10 @@ def compute_best_representative(image_list):
 def cluster_faces(image_paths):
     """
     Core algorithm:
+      - Uses a quality threshold to select the first cluster image.
+      - Compares incoming images to the cluster's BEST representative.
       - Never finalize ambiguous frame assignments until buffer resolution.
-      - When buffer length >= FaceConfig.CLUSTER_CONSECUTIVE_FRAMES:
-          * if last_ambiguous matches an existing representative -> assign all buffer to that cluster
-          * else -> create a new cluster and assign all buffer to it
-      - If a new incoming image matches the representative of current cluster,
-          assign the buffer (if any) back to the current cluster + the incoming image.
+    
     Returns:
       clusters: dict cluster_id -> [image_paths]
       representatives: dict cluster_id -> {'path','blur','size'}
@@ -155,10 +151,23 @@ def cluster_faces(image_paths):
     clusters = defaultdict(list)
     representatives = {}
     assignments = {}  # final assignment map (image -> metadata)
+    ambiguous = []  # buffer of ambiguous images (not yet assigned)
 
-    # init with first image as cluster 1 immediately
+    # Find the first sufficiently sharp image to start the first cluster ---
+    first_sharp_idx = -1
+    for i, path in enumerate(image_paths):
+        blur = calculate_blur_score(str(path))
+        if blur > FaceConfig.REPRESENTATIVE_BLUR_THRESHOLD:
+            first_sharp_idx = i
+            break
+    
+    if first_sharp_idx == -1:
+        logging.warning("No sharp enough images found to start clustering.")
+        return clusters, representatives, assignments
+
+    # Init with the first sharp image as cluster 1
     current_cluster = 1
-    first = image_paths[0]
+    first = image_paths[first_sharp_idx]
     clusters[current_cluster].append(first)
     rep = compute_best_representative([first])
     representatives[current_cluster] = rep
@@ -169,23 +178,31 @@ def cluster_faces(image_paths):
         "distance": None
     }
 
-    ambiguous = []  # buffer of ambiguous images (not yet assigned)
-    last_in_cluster = first  # always track last image added to current cluster
-    for idx in range(1, len(image_paths)):
+    # assign first image metadata
+    last_in_cluster = first
+
+    # Start loop from the image immediately following the one used to start the cluster
+    for idx in range(first_sharp_idx + 1, len(image_paths)):
         cur = image_paths[idx]
 
-        # compare incoming image to the last image added to the current cluster
-        verified, distance = verify_pair(last_in_cluster, cur)
+        # Compare incoming image to the current cluster's BEST representative
+        rep_path = representatives[current_cluster]["path"]
+        verified, distance = verify_pair(rep_path, cur)
 
         if verified:
-            # incoming matches current cluster last image -> everything in ambiguous belongs to current cluster
+            # incoming matches current cluster representative -> everything in ambiguous belongs to current cluster
             if ambiguous:
+                # Assign ambiguous frames back to the current cluster, comparing against the *new* good image (cur)
+                # or the representative. Comparing against 'cur' is often better as it's closer in time.
                 for amb in ambiguous:
-                    v, d = verify_pair(last_in_cluster, amb)
+                    # v, d = verify_pair(rep_path, amb) # Alternative: compare to representative
+                    v, d = verify_pair(cur, amb) # Compare against the newly verified, close-in-time image
+                    
+                    # Assume it should be assigned if 'cur' verified against the rep (strong signal)
                     clusters[current_cluster].append(amb)
                     assignments[amb] = {
                         "cluster_id": current_cluster,
-                        "compared_with": last_in_cluster,
+                        "compared_with": cur, 
                         "verified": bool(v),
                         "distance": d
                     }
@@ -200,7 +217,7 @@ def cluster_faces(image_paths):
             clusters[current_cluster].append(cur)
             assignments[cur] = {
                 "cluster_id": current_cluster,
-                "compared_with": last_in_cluster,
+                "compared_with": rep_path, # Log comparison against the representative
                 "verified": True,
                 "distance": distance
             }
@@ -209,12 +226,12 @@ def cluster_faces(image_paths):
             b = calculate_blur_score(cur); s = get_image_size(cur)
             if b > rep_curr["blur"] or (b == rep_curr["blur"] and s > rep_curr["size"]):
                 representatives[current_cluster] = {"path": cur, "blur": b, "size": s}
-            last_in_cluster = cur  # update last image in cluster
+            last_in_cluster = cur  # update last image in cluster for potential future use (and tie-break at end)
             continue
 
         # not verified -> buffer it
         ambiguous.append(cur)
-
+        
         # if buffer reaches threshold -> decide
         if len(ambiguous) >= FaceConfig.CLUSTER_CONSECUTIVE_FRAMES:
             # probe = last ambiguous frame
@@ -252,7 +269,8 @@ def cluster_faces(image_paths):
                         representatives[matched_cluster] = {"path": amb, "blur": b, "size": s}
                 # move current pointer to matched_cluster
                 current_cluster = matched_cluster
-                last_in_cluster = clusters[current_cluster][-1]
+                # last_in_cluster update is implicitly the last image of the merged cluster
+                last_in_cluster = clusters[current_cluster][-1] 
                 ambiguous = []
                 continue
 
@@ -266,10 +284,10 @@ def cluster_faces(image_paths):
                 best_rep = {"path": ambiguous[-1], "blur": calculate_blur_score(ambiguous[-1]), "size": get_image_size(ambiguous[-1])}
             representatives[current_cluster] = best_rep
 
-            # assign metadata for each ambiguous frame (compute individual distances to new rep for transparency)
+            # assign metadata for each ambiguous frame 
             for amb in ambiguous:
                 v, d = verify_pair(best_rep["path"], amb)
-                clusters[current_cluster].append  # just ensure structure usage (we already extended)
+                # clusters[current_cluster].append # already extended
                 assignments[amb] = {
                     "cluster_id": current_cluster,
                     "compared_with": best_rep["path"],
@@ -280,19 +298,49 @@ def cluster_faces(image_paths):
             ambiguous = []
             continue
 
-    # End loop: if any ambiguous frames remain (stream ended before threshold),
-    # tie-break: attach them to current cluster (you can change this policy)
+    # End loop: if any ambiguous frames remain check each of them against all cluster representatives
+    # and assign to the first matching cluster (if any)
     if ambiguous:
         for amb in ambiguous:
-            v, d = verify_pair(last_in_cluster, amb)
-            clusters[current_cluster].append(amb)
-            assignments[amb] = {
-                "cluster_id": current_cluster,
-                "compared_with": last_in_cluster,
-                "verified": bool(v),
-                "distance": d
-            }
-        ambiguous = []
+            # compare to all representatives
+            assigned = False
+            for cid, repinfo in representatives.items():
+                v, d = verify_pair(repinfo["path"], amb)
+                if v:
+                    clusters[cid].append(amb)
+                    assignments[amb] = {
+                        "cluster_id": cid,
+                        "compared_with": repinfo["path"],
+                        "verified": True,
+                        "distance": d
+                    }
+                    # update representative if needed
+                    rep_curr = representatives[cid]
+                    b = calculate_blur_score(amb); s = get_image_size(amb)
+                    if b > rep_curr["blur"] or (b == rep_curr["blur"] and s > rep_curr["size"]):
+                        representatives[cid] = {"path": amb, "blur": b, "size": s}
+                    assigned = True
+                    break
+            if not assigned:
+                # tie-break: assign to current cluster (original policy kept)
+                clusters[current_cluster].append(amb)
+                assignments[amb] = {
+                    "cluster_id": current_cluster,
+                    "compared_with": representatives[current_cluster]["path"],
+                    "verified": False,
+                    "distance": None
+                }
+                # update representative if needed
+                rep_curr = representatives[current_cluster]
+                b = calculate_blur_score(amb); s = get_image_size(amb)
+                if b > rep_curr["blur"] or (b == rep_curr["blur"] and s > rep_curr["size"]):
+                    representatives[current_cluster] = {"path": amb, "blur": b, "size": s}
+                    
+        # update representative based on added images
+        rep_curr = representatives[current_cluster]
+        new_rep = compute_best_representative(clusters[current_cluster])
+        if new_rep and new_rep["path"] != rep_curr["path"]:
+            representatives[current_cluster] = new_rep
 
     return clusters, representatives, assignments
 
@@ -314,7 +362,6 @@ def save_faces_to_clusters(image_paths, cluster_labels, output_dir):
         cluster_folder = output_dir / f"cluster_{label}"
         shutil.copy2(img_path, cluster_folder)
 
-
 # -------------------
 # Run & export
 # -------------------
@@ -331,7 +378,7 @@ if __name__ == "__main__":
     
     image_paths = sorted(
         [f for f in IMG_DIR.iterdir()
-        if f.suffix.lower() in (".png", ".jpg", ".jpeg") and get_image_size(str(f)) >= 10000]
+        if f.suffix.lower() in (".png", ".jpg", ".jpeg") and get_image_size(str(f)) >= 10000 and calculate_blur_score(str(f)) > FaceConfig.MIN_BLUR_THRESHOLD]
     )
     if not image_paths:
         raise ValueError(f"No images in {IMG_DIR}")
@@ -370,10 +417,13 @@ if __name__ == "__main__":
     print(f"Clusters: {len(clusters)}  —  Saved to {OUTPUT_CSV}, {OUTPUT_JSON}")
     print("Elapsed (s):", (datetime.now() - start).total_seconds())
 
-    # Print summary of clusters and images per cluster
+    # Print summary of clusters, images per cluster and representatives per cluster
     print("\nCluster Summary:")
     for cid, imgs in clusters.items():
         print(f"  Cluster {cid}: {len(imgs)} images")
+        rep = reps.get(cid)
+        if rep:
+            print(f"    Representative: {Path(rep['path']).name}")
 
     # Build a mapping from image path to cluster id
     img_to_cluster = {}
