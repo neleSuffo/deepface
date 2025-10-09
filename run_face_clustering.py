@@ -2,7 +2,6 @@ import cv2
 import csv
 import json
 import re
-import numpy as np
 import argparse
 import logging
 import shutil
@@ -13,6 +12,7 @@ from tqdm import tqdm
 from pathlib import Path
 from config import FaceConfig
 
+logging.basicConfig(level=logging.INFO)
 # -------------------
 # Utilities
 # -------------------
@@ -519,6 +519,7 @@ def final_confirmation(clusters, representatives):
                         min_distance = d_other
                         min_cluster_id = other_cluster_id
                 if min_cluster_id != cluster_id:
+                    logging.info(f"Rule 2: Reassigning {img} from cluster {cluster_id} to {min_cluster_id} (distance {min_distance:.4f})")
                     clusters[min_cluster_id].append(img)
                     clusters[cluster_id].remove(img)
             # 3. Outlier: distance > VERIFIED_DISTANCE_THRESHOLD, try to assign to another cluster or create new
@@ -529,15 +530,18 @@ def final_confirmation(clusters, representatives):
                         continue
                     verified, distance_other = verify_pair(other_rep["path"], img)
                     if distance_other is not None and distance_other <= FaceConfig.FINAL_CONFIRMATION_DISTANCE_THRESHOLD:
+                        logging.info(f"Rule 3: Reassigning {img} from cluster {cluster_id} to {other_cluster_id} (distance {distance_other:.4f})")
                         clusters[other_cluster_id].append(img)
                         assigned = True
                         break
                 if assigned:
                     clusters[cluster_id].remove(img)
                 else:
+                    logging.info(f"Rule 3: Creating new cluster {next_cluster_id} for outlier {img} from cluster {cluster_id}")
                     clusters[next_cluster_id] = [img]
                     representatives[next_cluster_id] = compute_best_representative([img])
                     clusters[cluster_id].remove(img)
+                    # Increment the next cluster ID
                     next_cluster_id += 1
         # Update representative for current cluster
         if clusters[cluster_id]:
@@ -611,18 +615,22 @@ if __name__ == "__main__":
     with open(OUTPUT_JSON, "w") as jf:
         json.dump(results, jf, indent=2)
 
+    # Remove clusters with only one image
+    clusters = {cid: imgs for cid, imgs in clusters.items() if len(imgs) > 1}
+    reps = {cid: rep for cid, rep in reps.items() if cid in clusters}
+
     # Build a mapping from image path to cluster id
     img_to_cluster = {}
     for cluster_id, imgs in clusters.items():
         for img in imgs:
             img_to_cluster[img] = cluster_id
-        # Renumber cluster IDs to be consecutive starting from 1
-        unique_cluster_ids = sorted(set(img_to_cluster.values()))
-        cluster_id_map = {old_id: new_id for new_id, old_id in enumerate(unique_cluster_ids, start=1)}
-        img_to_cluster_renumbered = {img: cluster_id_map[old_id] for img, old_id in img_to_cluster.items()}
-        # Get cluster labels for each image (default to -1 if not found)
-        cluster_labels = [img_to_cluster_renumbered.get(img, -1) for img in image_paths]
-        save_faces_to_clusters(image_paths, cluster_labels, CLST_DIR)
+    # Renumber cluster IDs to be consecutive starting from 1
+    unique_cluster_ids = sorted(set(img_to_cluster.values()))
+    cluster_id_map = {old_id: new_id for new_id, old_id in enumerate(unique_cluster_ids, start=1)}
+    img_to_cluster_renumbered = {img: cluster_id_map[old_id] for img, old_id in img_to_cluster.items()}
+    # Get cluster labels for each image (default to -1 if not found)
+    cluster_labels = [img_to_cluster_renumbered.get(img, -1) for img in image_paths]
+    save_faces_to_clusters(image_paths, cluster_labels, CLST_DIR)
     
     print(f"Clusters: {len(clusters)}  —  Saved to {OUTPUT_CSV}, {OUTPUT_JSON}")
 
