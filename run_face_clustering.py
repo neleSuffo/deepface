@@ -10,12 +10,9 @@ from collections import defaultdict
 from datetime import datetime
 from tqdm import tqdm
 from pathlib import Path
+from config import FaceConfig
 
-# -------------------
-# Configuration
-# -------------------
-CON_FRAMES = 3  # number of consecutive non-matching frames before deciding new cluster
-ENFORCE_DETECTION = False
+logging.basicConfig(level=logging.INFO)
 
 # -------------------
 # Utilities
@@ -48,7 +45,18 @@ def calculate_blur_score(image_path):
 
 
 def get_image_size(image_path):
-    """Returns image area (width * height)."""
+    """Returns image area (width * height).
+    
+    Parameters:
+    ----------
+    image_path (str):
+        Path to the image file.
+    
+    Returns: 
+    -------
+    int:
+        Image area in pixels (width * height), or 0 on failure.    
+    """
     try:
         img = cv2.imread(image_path)
         if img is None:
@@ -61,6 +69,18 @@ def get_image_size(image_path):
 
 
 def extract_frame_number(filename):
+    """Extracts a 6-digit frame number from the filename, or None if not found. 
+    
+    Parameters:
+    ----------
+    filename (Path):
+        Path object representing the image file.
+        
+    Returns: 
+    -------
+    int or None:
+        Extracted frame number, or None if not found.
+    """
     basename = filename.name
     match = re.search(r'_(\d{6})_face', basename)
     if match:
@@ -69,14 +89,29 @@ def extract_frame_number(filename):
 
 
 def verify_pair(img1, img2):
-    """Cached DeepFace.verify wrapper -> returns (verified: bool, distance: float|None)."""
+    """Function to verify if two images are of the same person using DeepFace.
+    Caches results to avoid redundant computations.
+    
+    Parameters:
+    ----------
+    img1 (str or Path):
+        Path to the first image file.
+    img2 (str or Path):
+        Path to the second image file. 
+        
+    Returns:
+    -------
+    (bool, float or None):
+        Tuple of (verified, distance). 'verified' is True if images match, False otherwise.
+        'distance' is the similarity distance, or None if verification failed.
+    """
     # symmetric key
     key = tuple(sorted([str(img1), str(img2)]))
     if key in _verify_cache:
         return _verify_cache[key]
 
     try:
-        res = DeepFace.verify(img1_path=img1, img2_path=img2, enforce_detection=ENFORCE_DETECTION)
+        res = DeepFace.verify(img1_path=img1, img2_path=img2, enforce_detection=False)
         verified = bool(res.get("verified", False))
         distance = res.get("distance", None)
     except Exception as e:
@@ -107,7 +142,7 @@ def cluster_faces(image_paths):
     """
     Core algorithm:
       - Never finalize ambiguous frame assignments until buffer resolution.
-      - When buffer length >= CON_FRAMES:
+      - When buffer length >= FaceConfig.CLUSTER_CONSECUTIVE_FRAMES:
           * if last_ambiguous matches an existing representative -> assign all buffer to that cluster
           * else -> create a new cluster and assign all buffer to it
       - If a new incoming image matches the representative of current cluster,
@@ -181,7 +216,7 @@ def cluster_faces(image_paths):
         ambiguous.append(cur)
 
         # if buffer reaches threshold -> decide
-        if len(ambiguous) >= CON_FRAMES:
+        if len(ambiguous) >= FaceConfig.CLUSTER_CONSECUTIVE_FRAMES:
             # probe = last ambiguous frame
             probe = ambiguous[-1]
 
@@ -290,10 +325,10 @@ if __name__ == "__main__":
 
     IMG_DIR = Path(args.input_dir)
     CLST_DIR = IMG_DIR/"clusters"
+    CLST_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_CSV = CLST_DIR/"face_clusters.csv"
     OUTPUT_JSON = CLST_DIR/"face_clusters.json"
     
-    logging.basicConfig(level=logging.INFO)
     image_paths = sorted(
         [f for f in IMG_DIR.iterdir()
         if f.suffix.lower() in (".png", ".jpg", ".jpeg") and get_image_size(str(f)) >= 10000]
@@ -319,7 +354,7 @@ if __name__ == "__main__":
             "compared_with": meta["compared_with"].name if meta and meta["compared_with"] else None,
             "verified": meta["verified"] if meta else False,
             "distance": meta["distance"] if meta else None,
-            "representative": rep_path
+            "representative": str(rep_path) if rep_path else None
         })
 
     # write CSV + JSON
@@ -334,6 +369,11 @@ if __name__ == "__main__":
 
     print(f"Clusters: {len(clusters)}  —  Saved to {OUTPUT_CSV}, {OUTPUT_JSON}")
     print("Elapsed (s):", (datetime.now() - start).total_seconds())
+
+    # Print summary of clusters and images per cluster
+    print("\nCluster Summary:")
+    for cid, imgs in clusters.items():
+        print(f"  Cluster {cid}: {len(imgs)} images")
 
     # Build a mapping from image path to cluster id
     img_to_cluster = {}
