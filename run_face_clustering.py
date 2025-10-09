@@ -4,9 +4,12 @@ import csv
 import json
 import re
 import logging
+import shutil
 from deepface import DeepFace
 from collections import defaultdict
 from datetime import datetime
+from tqdm import tqdm
+from pathlib import Path
 
 # -------------------
 # Configuration
@@ -249,6 +252,24 @@ def cluster_faces(image_paths):
     return clusters, representatives, assignments
 
 
+def save_faces_to_clusters(image_paths, cluster_labels, output_dir):
+    """
+    Copies each face image into its respective cluster folder.
+    Args:
+        image_paths (list): List of image file paths.
+        cluster_labels (list or array): Cluster assignment for each image.
+        output_dir (str or Path): Output directory for clusters.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for cluster_id in set(cluster_labels):
+        cluster_folder = output_dir / f"cluster_{cluster_id}"
+        cluster_folder.mkdir(parents=True, exist_ok=True)
+    for img_path, label in tqdm(zip(image_paths, cluster_labels), total=len(image_paths), desc="Copying images to cluster folders"):
+        cluster_folder = output_dir / f"cluster_{label}"
+        shutil.copy2(img_path, cluster_folder)
+
+
 # -------------------
 # Run & export
 # -------------------
@@ -294,3 +315,12 @@ if __name__ == "__main__":
 
     print(f"Clusters: {len(clusters)}  —  Saved to {OUTPUT_CSV}, {OUTPUT_JSON}")
     print("Elapsed (s):", (datetime.now() - start).total_seconds())
+
+    # Build a mapping from image path to cluster id
+    img_to_cluster = {}
+    for cid, imgs in clusters.items():
+        for img in imgs:
+            img_to_cluster[img] = cid
+    # Get cluster labels for each image (default to -1 if not found)
+    cluster_labels = [img_to_cluster.get(img, -1) for img in image_paths]
+    save_faces_to_clusters(image_paths, cluster_labels, IMG_DIR + "_clusters")
