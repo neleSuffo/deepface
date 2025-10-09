@@ -1,8 +1,8 @@
-import os
 import cv2
 import csv
 import json
 import re
+import argparse
 import logging
 import shutil
 from deepface import DeepFace
@@ -14,10 +14,6 @@ from pathlib import Path
 # -------------------
 # Configuration
 # -------------------
-IMG_DIR = "/home/nele_pauline_suffo/outputs/face_detections/quantex_at_home_id255944_2022_03_08_01_enhanced_annotated"
-OUTPUT_CSV = os.path.join(IMG_DIR, "face_clusters.csv")
-OUTPUT_JSON = os.path.join(IMG_DIR, "face_clusters.json")
-
 CON_FRAMES = 3  # number of consecutive non-matching frames before deciding new cluster
 ENFORCE_DETECTION = False
 
@@ -27,6 +23,19 @@ ENFORCE_DETECTION = False
 _verify_cache = {}
 
 def calculate_blur_score(image_path):
+    """Calculates a blur score for an image using the Laplacian variance.
+    A lower score indicates a blurrier image.
+    
+    Parameters:
+    ----------
+    image_path (str): 
+        Path to the image file.
+        
+    Returns:
+    -------
+    float:
+        Variance of the Laplacian; lower means blurrier.
+    """
     try:
         img = cv2.imread(image_path)
         if img is None:
@@ -39,6 +48,7 @@ def calculate_blur_score(image_path):
 
 
 def get_image_size(image_path):
+    """Returns image area (width * height)."""
     try:
         img = cv2.imread(image_path)
         if img is None:
@@ -51,7 +61,7 @@ def get_image_size(image_path):
 
 
 def extract_frame_number(filename):
-    basename = os.path.basename(filename)
+    basename = filename.name
     match = re.search(r'_(\d{6})_face', basename)
     if match:
         return int(match.group(1))
@@ -274,10 +284,20 @@ def save_faces_to_clusters(image_paths, cluster_labels, output_dir):
 # Run & export
 # -------------------
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Cluster face images in a directory.")
+    parser.add_argument("--img_dir", type=str, required=True, help="Directory containing face images.")
+    args = parser.parse_args()
+
+    IMG_DIR = Path(args.img_dir)
+    OUTPUT_CSV = IMG_DIR/"face_clusters.csv"
+    OUTPUT_JSON = IMG_DIR/"face_clusters.json"
+    
     logging.basicConfig(level=logging.INFO)
     image_paths = sorted(
-        [os.path.join(IMG_DIR, f) for f in os.listdir(IMG_DIR)
-         if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+        [
+            (IMG_DIR, f) for f in IMG_DIR.iterdir()
+            if f.lower().endswith((".png", ".jpg", ".jpeg")) and get_image_size(IMG_DIR, f) >= 10000
+        ]
     )
     if not image_paths:
         raise ValueError(f"No images in {IMG_DIR}")
@@ -295,9 +315,9 @@ if __name__ == "__main__":
             rep_path = reps[meta["cluster_id"]]["path"]
         results.append({
             "frame": frame_no,
-            "filename": os.path.basename(p),
+            "filename": p.name,
             "cluster_id": meta["cluster_id"] if meta else -1,
-            "compared_with": os.path.basename(meta["compared_with"]) if meta and meta["compared_with"] else None,
+            "compared_with": meta["compared_with"].name if meta and meta["compared_with"] else None,
             "verified": meta["verified"] if meta else False,
             "distance": meta["distance"] if meta else None,
             "representative": rep_path
@@ -323,4 +343,4 @@ if __name__ == "__main__":
             img_to_cluster[img] = cid
     # Get cluster labels for each image (default to -1 if not found)
     cluster_labels = [img_to_cluster.get(img, -1) for img in image_paths]
-    save_faces_to_clusters(image_paths, cluster_labels, IMG_DIR/"_clusters")
+    save_faces_to_clusters(image_paths, cluster_labels, Path(IMG_DIR)/"clusters")
