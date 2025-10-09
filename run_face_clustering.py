@@ -121,15 +121,40 @@ def verify_pair(img1, img2):
 
 
 def compute_best_representative(image_list):
-    """Return best image path (sharpest then largest) from a list, or None if empty."""
+    """Return best image path (most frontal, then sharpest, then largest) from a list, or None if empty."""
     if not image_list:
         return None
+    
     best = None
     for p in image_list:
+        # 1. Get Quality Metrics
         b = calculate_blur_score(p)
         s = get_image_size(p)
-        if best is None or s > best["size"] or (s == best["size"] and b > best["blur"]):
-            best = {"path": p, "blur": b, "size": s}
+        # 2. Get Pose Angles (Requires implementation of get_pose_angles)
+        yaw, pitch, _ = get_pose_angles(p) 
+        # Combine yaw and pitch into a single 'frontal score' - lower is better
+        # Use absolute values since a turn to the left (-yaw) is as bad as a turn to the right (+yaw)
+        frontal_score = abs(yaw) + abs(pitch) 
+
+        # 3. Decision Logic (Prioritize Frontality > Sharpness > Size)
+        current = {"path": p, "blur": b, "size": s, "frontal": frontal_score}
+        
+        if best is None:
+            best = current
+            continue
+
+        # Frontality Check (Primary criterion: lower frontal score is better)
+        if current["frontal"] < best["frontal"]:
+            best = current
+        elif current["frontal"] == best["frontal"]:
+            # Sharpness Check (Secondary criterion: higher blur score is better)
+            if current["blur"] > best["blur"]:
+                best = current
+            elif current["blur"] == best["blur"]:
+                # Size Check (Tertiary criterion: larger size is better)
+                if current["size"] > best["size"]:
+                    best = current
+                    
     return best
 
 
@@ -241,12 +266,12 @@ def cluster_faces(image_paths):
             matched_cluster = None
             matched_rep_path = None
             matched_distance = None
-            for cid, repinfo in representatives.items():
-                if cid == current_cluster:
+            for cluster_id, repinfo in representatives.items():
+                if cluster_id == current_cluster:
                     continue
                 v_rep, d_rep = verify_pair(repinfo["path"], probe)
                 if v_rep:
-                    matched_cluster = cid
+                    matched_cluster = cluster_id
                     matched_rep_path = repinfo["path"]
                     matched_distance = d_rep
                     break
@@ -304,21 +329,21 @@ def cluster_faces(image_paths):
         for amb in ambiguous:
             # compare to all representatives
             assigned = False
-            for cid, repinfo in representatives.items():
+            for cluster_id, repinfo in representatives.items():
                 v, d = verify_pair(repinfo["path"], amb)
                 if v:
-                    clusters[cid].append(amb)
+                    clusters[cluster_id].append(amb)
                     assignments[amb] = {
-                        "cluster_id": cid,
+                        "cluster_id": cluster_id,
                         "compared_with": repinfo["path"],
                         "verified": True,
                         "distance": d
                     }
                     # update representative if needed
-                    rep_curr = representatives[cid]
+                    rep_curr = representatives[cluster_id]
                     b = calculate_blur_score(amb); s = get_image_size(amb)
                     if b > rep_curr["blur"] or (b == rep_curr["blur"] and s > rep_curr["size"]):
-                        representatives[cid] = {"path": amb, "blur": b, "size": s}
+                        representatives[cluster_id] = {"path": amb, "blur": b, "size": s}
                     assigned = True
                     break
             if not assigned:
@@ -362,6 +387,72 @@ def save_faces_to_clusters(image_paths, cluster_labels, output_dir):
         cluster_folder = output_dir / f"cluster_{label}"
         shutil.copy2(img_path, cluster_folder)
 
+def final_confirmation(clusters, representatives):
+    """
+    1. Merge clusters with matching representatives.
+    2. For each image, confirm with its representative. If not matching, reassign to another cluster or new cluster.
+    Returns updated clusters and representatives.
+    """
+    # Step 1: Merge clusters with matching representatives
+    cluster_ids = list(clusters.keys())
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(cluster_ids)):
+            for j in range(i+1, len(cluster_ids)):
+                cluster_id1, cluster_id2 = cluster_ids[i], cluster_ids[j]
+                rep1, rep2 = representatives[cluster_id1]["path"], representatives[cluster_id2]["path"]
+                if cluster_id1 == cluster_id2:
+                    continue
+                verified, _ = verify_pair(rep1, rep2)
+                if verified:
+                    # Merge cluster_id2 into cluster_id1
+                    clusters[cluster_id1].extend(clusters[cluster_id2])
+                    # Remove cluster_id2
+                    del clusters[cluster_id2]
+                    del representatives[cluster_id2]
+                    cluster_ids.remove(cluster_id2)
+                    # Update representative for merged cluster
+                    new_rep = compute_best_representative(clusters[cluster_id1])
+                    representatives[cluster_id1] = new_rep
+                    merged = True
+                    break
+            if merged:
+                break
+    # Step 2: Reassign images within clusters
+    next_cluster_id = max(clusters.keys()) + 1
+    for cluster_id in list(clusters.keys()):
+        rep_path = representatives[cluster_id]["path"]
+        imgs_to_check = clusters[cluster_id][:]
+        for img in imgs_to_check:
+            verified, _ = verify_pair(rep_path, img)
+            if not verified:
+                # Try to assign to another cluster
+                assigned = False
+                for other_cluster_id, other_rep in representatives.items():
+                    if other_cluster_id == cluster_id:
+                        continue
+                    v, _ = verify_pair(other_rep["path"], img)
+                    if v:
+                        clusters[other_cluster_id].append(img)
+                        assigned = True
+                        break
+                if assigned:
+                    clusters[cluster_id].remove(img)
+                else:
+                    # Create new cluster for this image
+                    clusters[next_cluster_id] = [img]
+                    representatives[next_cluster_id] = compute_best_representative([img])
+                    clusters[cluster_id].remove(img)
+                    next_cluster_id += 1
+        # Update representative for current cluster
+        if clusters[cluster_id]:
+            representatives[cluster_id] = compute_best_representative(clusters[cluster_id])
+        else:
+            del clusters[cluster_id]
+            del representatives[cluster_id]
+    return clusters, representatives
+
 # -------------------
 # Run & export
 # -------------------
@@ -385,6 +476,8 @@ if __name__ == "__main__":
 
     start = datetime.now()
     clusters, reps, assignments = cluster_faces(image_paths)
+    # Final confirmation step
+    clusters, reps = final_confirmation(clusters, reps)
 
     # Build final ordered results (one row per input image, in same order)
     results = []
@@ -419,17 +512,17 @@ if __name__ == "__main__":
 
     # Print summary of clusters, images per cluster and representatives per cluster
     print("\nCluster Summary:")
-    for cid, imgs in clusters.items():
-        print(f"  Cluster {cid}: {len(imgs)} images")
-        rep = reps.get(cid)
+    for cluster_id, imgs in clusters.items():
+        print(f"  Cluster {cluster_id}: {len(imgs)} images")
+        rep = reps.get(cluster_id)
         if rep:
             print(f"    Representative: {Path(rep['path']).name}")
 
     # Build a mapping from image path to cluster id
     img_to_cluster = {}
-    for cid, imgs in clusters.items():
+    for cluster_id, imgs in clusters.items():
         for img in imgs:
-            img_to_cluster[img] = cid
+            img_to_cluster[img] = cluster_id
     # Get cluster labels for each image (default to -1 if not found)
     cluster_labels = [img_to_cluster.get(img, -1) for img in image_paths]
     save_faces_to_clusters(image_paths, cluster_labels, CLST_DIR)
