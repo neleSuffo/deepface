@@ -478,12 +478,13 @@ def final_confirmation(clusters, representatives):
     while merged:
         merged = False
         for i in range(len(cluster_ids)):
+            # 
             for j in range(i+1, len(cluster_ids)):
                 cluster_id1, cluster_id2 = cluster_ids[i], cluster_ids[j]
                 rep1, rep2 = representatives[cluster_id1]["path"], representatives[cluster_id2]["path"]
                 if cluster_id1 == cluster_id2:
                     continue
-                verified, _ = verify_pair(rep1, rep2)
+                verified, distance = verify_pair(rep1, rep2)
                 if verified:
                     # Merge cluster_id2 into cluster_id1
                     clusters[cluster_id1].extend(clusters[cluster_id2])
@@ -504,22 +505,36 @@ def final_confirmation(clusters, representatives):
         rep_path = representatives[cluster_id]["path"]
         imgs_to_check = clusters[cluster_id][:]
         for img in imgs_to_check:
-            verified, _ = verify_pair(rep_path, img)
-            if not verified:
-                # Try to assign to another cluster
+            verified, distance = verify_pair(rep_path, img)
+            # 1. Confident assignment: distance <= FINAL_CONFIRMATION_DISTANCE_THRESHOLD
+            if distance is not None and distance <= FaceConfig.FINAL_CONFIRMATION_DISTANCE_THRESHOLD:
+                continue  # Already assigned to current cluster, do nothing
+            # 2. Uncertain: between thresholds, check all clusters and assign to the one with lowest distance
+            elif distance is not None and FaceConfig.FINAL_CONFIRMATION_DISTANCE_THRESHOLD < distance <= FaceConfig.VERIFIED_DISTANCE_THRESHOLD:
+                min_distance = distance
+                min_cluster_id = cluster_id
+                for other_cluster_id, other_rep in representatives.items():
+                    d_other = verify_pair(other_rep["path"], img)[1]
+                    if d_other is not None and d_other < min_distance:
+                        min_distance = d_other
+                        min_cluster_id = other_cluster_id
+                if min_cluster_id != cluster_id:
+                    clusters[min_cluster_id].append(img)
+                    clusters[cluster_id].remove(img)
+            # 3. Outlier: distance > VERIFIED_DISTANCE_THRESHOLD, try to assign to another cluster or create new
+            elif distance is not None and distance > FaceConfig.VERIFIED_DISTANCE_THRESHOLD:
                 assigned = False
                 for other_cluster_id, other_rep in representatives.items():
                     if other_cluster_id == cluster_id:
                         continue
-                    v, _ = verify_pair(other_rep["path"], img)
-                    if v:
+                    verified, distance_other = verify_pair(other_rep["path"], img)
+                    if distance_other is not None and distance_other <= FaceConfig.FINAL_CONFIRMATION_DISTANCE_THRESHOLD:
                         clusters[other_cluster_id].append(img)
                         assigned = True
                         break
                 if assigned:
                     clusters[cluster_id].remove(img)
                 else:
-                    # Create new cluster for this image
                     clusters[next_cluster_id] = [img]
                     representatives[next_cluster_id] = compute_best_representative([img])
                     clusters[cluster_id].remove(img)
