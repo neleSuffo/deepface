@@ -2,6 +2,7 @@ import cv2
 import csv
 import json
 import re
+import numpy as np
 import argparse
 import logging
 import shutil
@@ -17,6 +18,84 @@ from config import FaceConfig
 # -------------------
 _verify_cache = {}
 
+def get_pose_angles(image_path):
+    """
+    Estimates the head pose based ONLY on face bounding box and eye coordinates, 
+    leveraging horizontal eye symmetry relative to the face center.
+    
+    The returned (yaw, pitch, roll) are PROXY SCORES, not true degrees.
+    Lower score means more frontal face (better for representative selection).
+    
+    Parameters:
+    ----------
+    image_path (str or Path): 
+        Path to the image file.
+        
+    Returns:
+    -------
+    (float, float, float):
+        Tuple of (yaw_proxy, pitch_proxy, roll_proxy). yaw_proxy is the main score.
+        Returns (100.0, 100.0, 0.0) on failure to ensure it is not picked as the best representative.
+    """
+    FAIL_SCORE = 100.0
+    
+    try:
+        face_objects = DeepFace.extract_faces(
+            img_path=str(image_path), 
+            detector_backend=FaceConfig.DEEPFACE_BACKEND, 
+            enforce_detection=False,
+            align=False
+        )
+
+        if not face_objects or len(face_objects) == 0:
+            return FAIL_SCORE, FAIL_SCORE
+
+        face_object = face_objects[0]  # Get the first detected face
+        
+        # Check for mandatory eye coordinates within facial_area
+        # Assuming the eye coordinates returned here are the centers (x, y)
+        left_eye = face_object.get('left_eye')
+        right_eye = face_object.get('right_eye')
+
+        if left_eye is None or right_eye is None:
+            # If eye coordinates are missing, it's a poor detection, so fail with a high score
+            return FAIL_SCORE, FAIL_SCORE
+
+        # --- YAW PROXY (Horizontal Frontality) ---
+        # Eye Midpoint X (Absolute image coordinate)
+        eye_mid_x = (left_eye[0] + right_eye[0]) / 2
+        
+        # Bounding Box Center X (Absolute image coordinate)
+        facial_area = face_object['facial_area']
+        bb_center_x = facial_area['x'] + (facial_area['w'] / 2)
+
+        # Offset: difference between eye midpoint and bounding box center
+        # This offset measures the horizontal tilt/turn (yaw)
+        horizontal_offset = abs(bb_center_x - eye_mid_x)
+        
+        # Normalize the offset by face width to get a scale-independent score (e.g., a fraction of face width)
+        # We multiply by 90 (or any constant) to give the score magnitude, making 90 degrees a max theoretical offset
+        yaw_proxy = (horizontal_offset / facial_area['w']) * 90.0
+        
+        # --- PITCH PROXY (Vertical Frontality) ---
+        # A simple proxy for pitch is the vertical offset of the eye line from a "standard" line (e.g., 40% down from top)
+        # More robustly, if the eyes are vertically misaligned, it implies a roll or pitch.
+        vertical_eye_diff = abs(left_eye[1] - right_eye[1])
+        
+        # Normalize by face height (H). A small difference in y implies less roll/pitch.
+        pitch_proxy = (vertical_eye_diff / facial_area['h']) * 90.0 # Using the same scale
+                
+        # Ensure the score is not excessively large if eyes are detected far outside the box
+        yaw_proxy = min(yaw_proxy, 90.0) 
+        pitch_proxy = min(pitch_proxy, 90.0)
+
+        # The resulting yaw_proxy and pitch_proxy now act as our 'frontal_score' components
+        return yaw_proxy, pitch_proxy
+
+    except Exception as e:
+        logging.warning(f"Pose angle estimation (Symmetry Proxy) failed for {image_path}: {e}")
+        return FAIL_SCORE, FAIL_SCORE
+    
 def calculate_blur_score(image_path):
     """Calculates a blur score for an image using the Laplacian variance.
     A lower score indicates a blurrier image.
@@ -130,8 +209,8 @@ def compute_best_representative(image_list):
         # 1. Get Quality Metrics
         b = calculate_blur_score(p)
         s = get_image_size(p)
-        # 2. Get Pose Angles (Requires implementation of get_pose_angles)
-        yaw, pitch, _ = get_pose_angles(p) 
+        # 2. Get Pose Angles
+        yaw, pitch = get_pose_angles(p)
         # Combine yaw and pitch into a single 'frontal score' - lower is better
         # Use absolute values since a turn to the left (-yaw) is as bad as a turn to the right (+yaw)
         frontal_score = abs(yaw) + abs(pitch) 
@@ -471,11 +550,21 @@ if __name__ == "__main__":
         [f for f in IMG_DIR.iterdir()
         if f.suffix.lower() in (".png", ".jpg", ".jpeg") and get_image_size(str(f)) >= 10000 and calculate_blur_score(str(f)) > FaceConfig.MIN_BLUR_THRESHOLD]
     )
-    if not image_paths:
+    
+    # run deepface to filter out images where deepface cannot detect a face
+    image_paths_deepface = []
+    for img_path in image_paths:
+        try:
+            face_objs = DeepFace.extract_faces(img_path=str(img_path), detector_backend=FaceConfig.DEEPFACE_BACKEND, align=True)
+            if face_objs and len(face_objs) > 0:
+                image_paths_deepface.append(img_path)
+        except ValueError:
+            logging.warning(f"DeepFace failed to detect face in {img_path}, skipping.")
+    if not image_paths_deepface:
         raise ValueError(f"No images in {IMG_DIR}")
 
     start = datetime.now()
-    clusters, reps, assignments = cluster_faces(image_paths)
+    clusters, reps, assignments = cluster_faces(image_paths_deepface)
     # Final confirmation step
     clusters, reps = final_confirmation(clusters, reps)
 
@@ -523,6 +612,10 @@ if __name__ == "__main__":
     for cluster_id, imgs in clusters.items():
         for img in imgs:
             img_to_cluster[img] = cluster_id
-    # Get cluster labels for each image (default to -1 if not found)
-    cluster_labels = [img_to_cluster.get(img, -1) for img in image_paths]
-    save_faces_to_clusters(image_paths, cluster_labels, CLST_DIR)
+        # Renumber cluster IDs to be consecutive starting from 1
+        unique_cluster_ids = sorted(set(img_to_cluster.values()))
+        cluster_id_map = {old_id: new_id for new_id, old_id in enumerate(unique_cluster_ids, start=1)}
+        img_to_cluster_renumbered = {img: cluster_id_map[old_id] for img, old_id in img_to_cluster.items()}
+        # Get cluster labels for each image (default to -1 if not found)
+        cluster_labels = [img_to_cluster_renumbered.get(img, -1) for img in image_paths]
+        save_faces_to_clusters(image_paths, cluster_labels, CLST_DIR)
