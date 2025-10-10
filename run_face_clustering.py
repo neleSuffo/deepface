@@ -473,33 +473,35 @@ def final_confirmation(clusters, representatives):
     Returns updated clusters and representatives.
     """
     # Step 1: Merge clusters with matching representatives
-    cluster_ids = list(clusters.keys())
-    merged = True
-    while merged:
-        merged = False
-        for i in range(len(cluster_ids)):
-            # 
-            for j in range(i+1, len(cluster_ids)):
-                cluster_id1, cluster_id2 = cluster_ids[i], cluster_ids[j]
-                rep1, rep2 = representatives[cluster_id1]["path"], representatives[cluster_id2]["path"]
-                if cluster_id1 == cluster_id2:
-                    continue
-                verified, distance = verify_pair(rep1, rep2)
-                if verified:
-                    # Merge cluster_id2 into cluster_id1
-                    logging.info(f"Merging {cluster_id1} and {cluster_id2} with representatives {rep1} and {rep2}.")
-                    clusters[cluster_id1].extend(clusters[cluster_id2])
-                    # Remove cluster_id2
-                    del clusters[cluster_id2]
-                    del representatives[cluster_id2]
-                    cluster_ids.remove(cluster_id2)
-                    # Update representative for merged cluster
-                    new_rep = compute_best_representative(clusters[cluster_id1])
-                    representatives[cluster_id1] = new_rep
-                    merged = True
+    def merge_clusters(clusters, representatives):
+        cluster_ids = list(clusters.keys())
+        merged = True
+        while merged:
+            merged = False
+            for i in range(len(cluster_ids)):
+                for j in range(i+1, len(cluster_ids)):
+                    cluster_id1, cluster_id2 = cluster_ids[i], cluster_ids[j]
+                    rep1, rep2 = representatives[cluster_id1]["path"], representatives[cluster_id2]["path"]
+                    if cluster_id1 == cluster_id2:
+                        continue
+                    verified, distance = verify_pair(rep1, rep2)
+                    if verified:
+                        logging.info(f"Merging {cluster_id1} and {cluster_id2} with representatives {rep1} and {rep2}.")
+                        clusters[cluster_id1].extend(clusters[cluster_id2])
+                        del clusters[cluster_id2]
+                        del representatives[cluster_id2]
+                        cluster_ids.remove(cluster_id2)
+                        new_rep = compute_best_representative(clusters[cluster_id1])
+                        representatives[cluster_id1] = new_rep
+                        merged = True
+                        break
+                if merged:
                     break
-            if merged:
-                break
+        return clusters, representatives
+
+    # Step 1: initial merge
+    clusters, representatives = merge_clusters(clusters, representatives)
+
     # Step 2: Reassign images within clusters
     next_cluster_id = max(clusters.keys()) + 1
     for cluster_id in list(clusters.keys()):
@@ -552,6 +554,7 @@ def final_confirmation(clusters, representatives):
         else:
             del clusters[cluster_id]
             del representatives[cluster_id]
+
     return clusters, representatives
 
 # -------------------
@@ -567,6 +570,9 @@ if __name__ == "__main__":
     CLST_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_CSV = CLST_DIR/"face_clusters.csv"
     OUTPUT_JSON = CLST_DIR/"face_clusters.json"
+    # Ensure parent directories for output files exist
+    OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
     
     image_paths = sorted(
         [f for f in IMG_DIR.iterdir()
