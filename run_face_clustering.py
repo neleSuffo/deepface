@@ -487,6 +487,7 @@ def final_confirmation(clusters, representatives):
                 verified, distance = verify_pair(rep1, rep2)
                 if verified:
                     # Merge cluster_id2 into cluster_id1
+                    logging.info(f"Merging {cluster_id1} and {cluster_id2} with representatives {rep1} and {rep2}.")
                     clusters[cluster_id1].extend(clusters[cluster_id2])
                     # Remove cluster_id2
                     del clusters[cluster_id2]
@@ -502,12 +503,14 @@ def final_confirmation(clusters, representatives):
     # Step 2: Reassign images within clusters
     next_cluster_id = max(clusters.keys()) + 1
     for cluster_id in list(clusters.keys()):
+        logging.info(f"Found clusters {list(clusters.keys())}")
         rep_path = representatives[cluster_id]["path"]
         imgs_to_check = clusters[cluster_id][:]
         for img in imgs_to_check:
             verified, distance = verify_pair(rep_path, img)
             # 1. Confident assignment: distance <= FINAL_CONFIRMATION_DISTANCE_THRESHOLD
-            if verified:
+            if distance is not None and distance <= FaceConfig.FINAL_CONFIRMATION_DISTANCE_THRESHOLD:
+                logging.info(f"Rule 1: Confirming {img} in cluster {cluster_id} (distance {distance:.4f})")
                 continue  # Already assigned to current cluster, do nothing
             # 2. Uncertain: between thresholds, check all clusters and assign to the one with lowest distance
             elif distance is not None and FaceConfig.FINAL_CONFIRMATION_DISTANCE_THRESHOLD < distance <= FaceConfig.VERIFIED_DISTANCE_THRESHOLD:
@@ -523,7 +526,7 @@ def final_confirmation(clusters, representatives):
                     clusters[min_cluster_id].append(img)
                     clusters[cluster_id].remove(img)
             # 3. Outlier: distance > VERIFIED_DISTANCE_THRESHOLD, try to assign to another cluster or create new
-            elif verified is False:
+            elif distance is None or distance > FaceConfig.VERIFIED_DISTANCE_THRESHOLD:
                 assigned = False
                 for other_cluster_id, other_rep in representatives.items():
                     if other_cluster_id == cluster_id:
@@ -584,6 +587,13 @@ if __name__ == "__main__":
 
     start = datetime.now()
     clusters, reps, assignments = cluster_faces(image_paths_deepface)
+    
+    # print clusters with it's images and representatives
+    for cid, imgs in clusters.items():
+        print(f"Cluster {cid}: {imgs}")
+        rep = reps.get(cid)
+        if rep:
+            print(f"  Representative: {Path(rep['path']).name} (blur={rep['blur']:.2f}, size={rep['size']})")
     # Final confirmation step
     clusters, reps = final_confirmation(clusters, reps)
 
